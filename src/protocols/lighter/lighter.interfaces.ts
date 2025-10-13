@@ -57,7 +57,7 @@ export interface ILighterOrderParams extends IBaseOrderRequest {
   orderType: LighterOrderType;
   timeInForce: LighterTimeInForce;
   reduceOnly: boolean;
-  triggerPrice?: string;
+  triggerPrice?: number;
   expiredAt?: number; // Unix timestamp
 }
 
@@ -172,44 +172,11 @@ export interface ILighterInternalPosition extends IBaseInternalPosition {
   realizedPnl?: string;
 }
 
-// Authentication interfaces
-export interface ILighterApiKey {
-  privateKey: string;
-  publicKey: string;
-}
-
-export interface ILighterAuthToken {
-  token: string;
-  expiry: number; // Unix timestamp
-}
-
-// Transaction interfaces (matches Python reference sign_create_order parameters)
-export interface ILighterTransaction {
-  market_index: number;
-  client_order_index: number;
-  base_amount: string;
-  price: string;
-  is_ask: number; // 0 or 1
-  order_type: number;
-  time_in_force: number;
-  reduce_only: number; // 0 or 1
-  trigger_price: string;
-  order_expiry: number;
-  nonce: number;
-}
-
 // Configuration interface
 export interface ILighterConfig {
   baseUrl: string;
-  apiKeyPrivateKey: string;
+  privateKey: string;
   publicKey: string;
   accountIndex: number;
   apiKeyIndex: number;
-}
-
-// API response interfaces
-export interface ILighterSendTxResponse {
-  code: number;
-  message?: string;
-  tx_hash?: string;
 }
