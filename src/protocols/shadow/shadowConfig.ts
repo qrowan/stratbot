@@ -4,4 +4,6 @@ export const shadowConfig = {
   sonicAddress: '0x0000000000000000000000000000000000000000',
   btcAddress: '0x0000000000000000000000000000000000000000',
   ethAddress: '0x0000000000000000000000000000000000000000',
+  slippageTolerance: "0.5", // 0.01~20 %
+  deadline: "30", // 3 hours
 }

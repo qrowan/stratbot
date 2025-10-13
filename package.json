@@ -1,5 +1,5 @@
 {
-"name": "stratbot",
+  "name": "stratbot",
   "version": "0.0.1",
   "description": "",
   "author": "",
@@ -23,6 +23,7 @@
     "test:e2e": "jest --config ./test/jest-e2e.json"
   },
   "dependencies": {
+    "@aws-sdk/client-sqs": "^3.899.0",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^4.0.2",
     "@nestjs/core": "^11.0.1",

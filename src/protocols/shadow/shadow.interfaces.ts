@@ -4,9 +4,9 @@ import { Hex } from "viem";
 import { ChecksumAddress } from "src/utils/checksumAddress";
 
 export interface IShadowOrderRequest extends IBaseOrderRequest {
-  tokenIn: ChecksumAddress;
-  tokenOut: ChecksumAddress;
-  amountIn: number;
+  tokenInSymbol: string;
+  tokenOutSymbol: string;
+  amountInWei: string;
   callData: string;
   value: number;
 }
@@ -33,6 +33,7 @@ export interface IShadowMarketData extends IBaseMarketData {
 export interface IQuoteResult {
   amountIn: number;
   amountOut: number;
+  amountInWei: string;
   callData: string;
   value: number;
   rawData: any;
@@ -42,4 +43,10 @@ export interface IQuoteResult {
 export interface IShadowOrderResult extends IBaseOrderResult { }
 export interface IShadowSuccessOrderResult extends ISuccessBaseOrderResult { }
 export interface IShadowInternalPosition extends IBaseInternalPosition {
+}
+
+export interface IShadowConfig {
+  url: string;
+  privateKey: string;
+  publicKey: string;
 }

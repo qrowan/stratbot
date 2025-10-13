@@ -6,16 +6,12 @@ import {
   ILighterOrderData,
   ILighterOrderParams,
   ILighterOrderResult,
-  ILighterSuccessOrderResult,
   ILighterConfig,
-  ILighterTransaction,
-  ILighterAuthToken,
   ILighterOrderBookOrders,
   ILighterOrderBookOrdersApiResponse,
   ILighterOrderApiResponse,
   ILighterOrdersApiResponse,
   ILighterOrderApiData,
-  ILighterSendTxResponse,
   LighterOrderStatus,
   LighterOrderType,
   LighterTimeInForce,
@@ -23,28 +19,20 @@ import {
 } from './lighter.interfaces';
 import {
   MARKET_ID_MAP,
-  DEFAULT_28_DAY_ORDER_EXPIRY,
-  DEFAULT_10_MIN_AUTH_EXPIRY,
-  NIL_TRIGGER_PRICE,
-  TX_TYPE_CREATE_ORDER,
-  TX_TYPE_CANCEL_ORDER,
-  ORDER_TYPE_LIMIT,
-  ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
   CODE_OK,
   ENDPOINTS,
+  LIGHTER_STATUS_MAP,
+  TX_TYPE_CREATE_ORDER,
 } from './constants';
-import { delay } from 'src/utils/utils';
 import axios, { AxiosInstance } from 'axios';
-import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
-import { keccak256, toHex, stringToBytes, Hex } from 'viem';
+import { SecureLighterSigner, SecureSignerConfig } from './secure-signer';
 
 export class Lighter implements IProtocol {
   public readonly name = 'Lighter';
   private readonly logger = new Logger(Lighter.name);
   private readonly config: ILighterConfig;
   private readonly httpClient: AxiosInstance;
-  private readonly account: PrivateKeyAccount;
-  private authToken: ILighterAuthToken | null = null;
+  private readonly signer: SecureLighterSigner;
 
   constructor(config: ILighterConfig) {
     this.config = config;
@@ -52,40 +40,53 @@ export class Lighter implements IProtocol {
       baseURL: config.baseUrl,
       timeout: 30000,
     });
-    
-    // Initialize viem account for signing
-    this.account = privateKeyToAccount(config.apiKeyPrivateKey as Hex);
-    this.logger.log(`Lighter protocol initialized for account: ${this.account.address}`);
+
+    // Initialize secure WASM signer
+    this.signer = new SecureLighterSigner({
+      privateKey: config.privateKey,
+      accountIndex: config.accountIndex,
+      apiKeyIndex: config.apiKeyIndex,
+    });
+
+    this.logger.log('Lighter protocol initialized with secure WASM signer');
   }
 
-  async createOrder(params: ILighterOrderParams): Promise<ILighterOrderData> {
+  async placeOrder(params: ILighterOrderParams): Promise<ILighterOrderData> {
     try {
+      // Ensure signer is initialized
+      await this.ensureSignerInitialized();
+
       // Get next nonce
       const nonce = await this.getNextNonce();
-      
+
       // Create transaction data for signing
-      const transaction: ILighterTransaction = {
-        market_index: params.marketIndex,
-        client_order_index: params.clientOrderIndex,
-        base_amount: params.baseAmount,
-        price: params.price,
-        is_ask: params.isAsk ? 1 : 0,
-        order_type: this.mapOrderTypeToNumber(params.orderType),
-        time_in_force: this.mapTimeInForceToNumber(params.timeInForce),
-        reduce_only: params.reduceOnly ? 1 : 0,
-        trigger_price: params.triggerPrice || NIL_TRIGGER_PRICE,
-        order_expiry: params.expiredAt || (Math.floor(Date.now() / 1000) + DEFAULT_28_DAY_ORDER_EXPIRY),
+      const transaction = {
+        marketIndex: params.marketIndex,
+        clientOrderIndex: params.clientOrderIndex,
+        baseAmount: parseInt(params.baseAmount),
+        price: parseInt(params.price),
+        isAsk: params.isAsk,
+        orderType: this.mapOrderTypeToNumber(params.orderType),
+        timeInForce: this.mapTimeInForceToNumber(params.timeInForce),
+        reduceOnly: params.reduceOnly,
+        triggerPrice: params.triggerPrice || 0,
+        orderExpiry: params.expiredAt || this.getDefaultOrderExpiry(),
         nonce: nonce,
       };
 
-      // Sign the transaction
-      const signedTxInfo = await this.signTransaction(transaction);
-      
-      // Send transaction to Lighter
-      const response = await this.httpClient.post<ILighterSendTxResponse>(ENDPOINTS.SEND_TX, {
-        tx_type: TX_TYPE_CREATE_ORDER,
-        tx_info: signedTxInfo,
-        price_protection: true,
+      // Sign the transaction with secure WASM signer
+      const txInfo = await this.signer.createOrderTransaction(transaction);
+
+      // Send transaction to Lighter using URLSearchParams
+      const requestParams = new URLSearchParams();
+      requestParams.append('tx_type', TX_TYPE_CREATE_ORDER);
+      requestParams.append('tx_info', txInfo);
+      requestParams.append('price_protection', 'true');
+
+      const response = await this.httpClient.post(ENDPOINTS.SEND_TX, requestParams, {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
       });
 
       if (response.data.code !== CODE_OK) {
@@ -102,37 +103,44 @@ export class Lighter implements IProtocol {
         params: params,
       };
     } catch (error) {
-      this.logger.error('Failed to create order', error);
       throw error;
     }
   }
 
   async cancelOrder(orderData: ILighterOrderData): Promise<void> {
     try {
-      // Get next nonce
+      // Ensure signer is initialized
+      await this.ensureSignerInitialized();
+
+      // Get next nonce for cancellation
       const nonce = await this.getNextNonce();
-      
+
       // Create cancel transaction data
-      const transaction = {
-        market_index: orderData.marketIndex,
-        order_index: orderData.clientOrderIndex,
+      const cancelTransaction = {
+        marketIndex: orderData.marketIndex,
+        orderIndex: orderData.clientOrderIndex,
         nonce: nonce,
       };
 
-      // Sign the cancel transaction
-      const signedTxInfo = await this.signCancelTransaction(transaction);
-      
+      // Sign the cancel transaction with secure WASM signer
+      const txInfo = await this.signer.cancelOrderTransaction(cancelTransaction);
+
       // Send cancel transaction to Lighter
-      const response = await this.httpClient.post<ILighterSendTxResponse>(ENDPOINTS.SEND_TX, {
-        tx_type: TX_TYPE_CANCEL_ORDER,
-        tx_info: signedTxInfo,
+      const requestParams = new URLSearchParams();
+      requestParams.append('tx_type', '15'); // TX_TYPE_CANCEL_ORDER
+      requestParams.append('tx_info', txInfo);
+
+      const response = await this.httpClient.post(ENDPOINTS.SEND_TX, requestParams, {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
       });
 
       if (response.data.code !== CODE_OK) {
         throw new Error(`Cancel order failed: ${response.data.message}`);
       }
 
-      this.logger.log(`Order ${orderData.id} cancelled successfully`);
+      this.logger.log(`Order ${orderData.id} cancelled successfully. TxHash: ${response.data.tx_hash}`);
     } catch (error) {
       this.logger.error('Failed to cancel order', error);
       throw error;
@@ -142,16 +150,18 @@ export class Lighter implements IProtocol {
   async getOrderResult(orderData: ILighterOrderData): Promise<ILighterOrderResult> {
     try {
       const orderStatus = await this.pollOrderStatus(orderData);
-      
+
       return {
+        protocolName: this.name,
         id: orderData.id,
-        status: this.mapLighterStatusToOrderState(orderStatus.lighterStatus),
+        status: LIGHTER_STATUS_MAP[orderStatus.lighterStatus],
         result: orderData.params,
         ...orderStatus,
       };
     } catch (error) {
       this.logger.error('Failed to get order result', error);
       return {
+        protocolName: this.name,
         id: orderData.id,
         status: OrderState.CANCELED,
         result: `Failed to get order status: ${error.message}`,
@@ -163,12 +173,12 @@ export class Lighter implements IProtocol {
   async getMarketData(params: ILighterMarketDataRequest): Promise<ILighterMarketData> {
     try {
       // Fetch order book data for each symbol in parallel
-      const orderBookPromises = params.symbols.map(symbol => 
+      const orderBookPromises = params.symbols.map(symbol =>
         this.fetchOrderBookOrders(symbol)
       );
-      
+
       const orderBookResults = await Promise.all(orderBookPromises);
-      
+
       // Build the market data structure
       const orderBookOrders: Record<string, ILighterOrderBookOrders> = {};
       params.symbols.forEach((symbol, index) => {
@@ -188,7 +198,7 @@ export class Lighter implements IProtocol {
     }
   }
 
-  async getPosition(id: string): Promise<ILighterInternalPosition> {
+  async getPosition(_id: string): Promise<ILighterInternalPosition> {
     throw new Error('getPosition not implemented yet');
   }
 
@@ -231,7 +241,7 @@ export class Lighter implements IProtocol {
     );
 
     this.validateOrderBookResponse(response.data);
-    
+
     // Convert API response to internal format
     return {
       code: response.data.code,
@@ -321,42 +331,6 @@ export class Lighter implements IProtocol {
     }
   }
 
-  private async signTransaction(transaction: ILighterTransaction): Promise<string> {
-    // This would typically call the native signer library
-    // For now, we'll create a placeholder implementation
-    // In a real implementation, this would call the Go signer library
-    
-    const message = this.buildTransactionMessage(transaction);
-    const messageHash = keccak256(stringToBytes(message));
-    const signature = await this.account.signMessage({ message });
-    
-    return JSON.stringify({
-      ...transaction,
-      sig: signature,
-    });
-  }
-
-  private async signCancelTransaction(transaction: any): Promise<string> {
-    // Similar to signTransaction but for cancel orders
-    const message = this.buildCancelTransactionMessage(transaction);
-    const messageHash = keccak256(stringToBytes(message));
-    const signature = await this.account.signMessage({ message });
-    
-    return JSON.stringify({
-      ...transaction,
-      sig: signature,
-    });
-  }
-
-  private buildTransactionMessage(transaction: ILighterTransaction): string {
-    // Build message string for signing based on Lighter protocol
-    return `${transaction.market_index}:${transaction.client_order_index}:${transaction.base_amount}:${transaction.price}:${transaction.is_ask}:${transaction.order_type}:${transaction.time_in_force}:${transaction.reduce_only}:${transaction.trigger_price}:${transaction.order_expiry}:${transaction.nonce}`;
-  }
-
-  private buildCancelTransactionMessage(transaction: any): string {
-    // Build message string for cancel transaction signing
-    return `${transaction.market_index}:${transaction.order_index}:${transaction.nonce}`;
-  }
 
   // Validation methods
   private validateOrderBookResponse(data: unknown): asserts data is ILighterOrderBookOrdersApiResponse {
@@ -414,11 +388,11 @@ export class Lighter implements IProtocol {
     }
 
     const o = order as any;
-    
+
     const requiredFields = [
       'order_index', 'client_order_index', 'order_id', 'client_order_id',
       'market_index', 'owner_account_index', 'initial_base_amount', 'price',
-      'remaining_base_amount', 'filled_base_amount', 'filled_quote_amount', 
+      'remaining_base_amount', 'filled_base_amount', 'filled_quote_amount',
       'status', 'is_ask', 'side', 'type', 'time_in_force', 'reduce_only',
       'timestamp', 'block_height'
     ];
@@ -458,29 +432,18 @@ export class Lighter implements IProtocol {
     }
   }
 
-  private mapLighterStatusToOrderState(status: LighterOrderStatus): OrderState {
-    switch (status) {
-      case LighterOrderStatus.FILLED:
-        return OrderState.FILLED;
-      case LighterOrderStatus.OPEN:
-      case LighterOrderStatus.PENDING:
-      case LighterOrderStatus.IN_PROGRESS:
-        return OrderState.PENDING;
-      case LighterOrderStatus.CANCELED:
-      case LighterOrderStatus.CANCELED_POST_ONLY:
-      case LighterOrderStatus.CANCELED_REDUCE_ONLY:
-      case LighterOrderStatus.CANCELED_POSITION_NOT_ALLOWED:
-      case LighterOrderStatus.CANCELED_MARGIN_NOT_ALLOWED:
-      case LighterOrderStatus.CANCELED_TOO_MUCH_SLIPPAGE:
-      case LighterOrderStatus.CANCELED_NOT_ENOUGH_LIQUIDITY:
-      case LighterOrderStatus.CANCELED_SELF_TRADE:
-      case LighterOrderStatus.CANCELED_EXPIRED:
-      case LighterOrderStatus.CANCELED_OCO:
-      case LighterOrderStatus.CANCELED_CHILD:
-      case LighterOrderStatus.CANCELED_LIQUIDATION:
-        return OrderState.CANCELED;
-      default:
-        return OrderState.CANCELED;
+  // Initialize signer when first needed
+  private async ensureSignerInitialized(): Promise<void> {
+    try {
+      await this.signer.initialize();
+    } catch (error) {
+      this.logger.error('Failed to initialize signer', error);
+      throw error;
     }
+  }
+
+  private getDefaultOrderExpiry(): number {
+    // Default to 28 days from now (in seconds)
+    return Math.floor(Date.now() / 1000) + (28 * 24 * 60 * 60);
   }
 }

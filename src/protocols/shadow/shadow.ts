@@ -8,6 +8,7 @@ import { sonic } from "viem/chains";
 import ERC20_ABI from "./abis/ERC20.json";
 import { toChecksumAddress } from "src/utils/checksumAddress";
 import { validatePrivatePublicKeyPair } from "src/utils/blockchain";
+import { shadowConfig } from "./shadowConfig";
 
 export class Shadow implements IProtocol {
   public readonly name = 'Shadow';
@@ -43,9 +44,29 @@ export class Shadow implements IProtocol {
     });
   }
 
-  async createOrder(params: IShadowOrderRequest): Promise<IShadowOrderData> {
+  async placeOrder(params: IShadowOrderRequest): Promise<IShadowOrderData> {
     const id = crypto.randomUUID();
+    const tokenIn = getTokenBySymbol(params.tokenInSymbol);
+    const amountInWei = params.amountInWei;
     try {
+      const approveTxHash = await this.walletClient.sendTransaction({
+        account: this.account,
+        chain: sonic,
+        to: tokenIn.address as Hex,
+        data: encodeFunctionData({
+          abi: ERC20_ABI,
+          functionName: 'approve',
+          args: [UNIVERSAL_ROUTER_ADDRESS, amountInWei],
+        }),
+        value: 0n,
+      });
+      const approveReceipt = await this.publicClient.waitForTransactionReceipt({
+        hash: approveTxHash,
+      });
+      if (approveReceipt.status !== 'success') {
+        throw new Error(`Approve transaction failed: ${approveReceipt.status}`);
+      }
+
       const txHash = await this.walletClient.sendTransaction({
         account: this.account,
         chain: sonic,
@@ -60,7 +81,7 @@ export class Shadow implements IProtocol {
         params: params,
       }
     } catch (error) {
-      this.logger.error('Create order failed', error.stack, 'createOrder');
+      this.logger.error('Create order failed', error.stack, 'placeOrder');
       throw error;
     }
   }
@@ -81,7 +102,7 @@ export class Shadow implements IProtocol {
 
       if (receipt.status === 'success') {
         const sender = receipt.from;
-        const tokenOut = orderData.params.tokenOut;
+        const tokenOut = orderData.params.tokenOutSymbol;
 
         const transferEvent = receipt.logs
           .filter(log => toChecksumAddress(log.address) === tokenOut)
@@ -114,6 +135,7 @@ export class Shadow implements IProtocol {
         const amountOut = transferEvent.value;
 
         return {
+          protocolName: this.name,
           id: orderData.id,
           status: OrderState.FILLED,
           result: {
@@ -123,6 +145,7 @@ export class Shadow implements IProtocol {
         }
       } else {
         return {
+          protocolName: this.name,
           id: orderData.id,
           status: OrderState.CANCELED,
           result: {
@@ -130,6 +153,7 @@ export class Shadow implements IProtocol {
           },
         }
       }
+
     } catch (error) {
       this.logger.error('Get order result failed', error.stack, 'getOrderResult');
       throw error;
@@ -198,10 +222,11 @@ export class Shadow implements IProtocol {
   async quote(tokenInSymbol: string, tokenOutSymbol: string, values: number[], qouteAmounts: number[]): Promise<Record<number, IQuoteResult>> {
     if (values.length !== qouteAmounts.length) throw new Error('Quote: Invalid length');
     const tokenIn = getTokenBySymbol(tokenInSymbol);
+
     try {
       const responses = await Promise.all(qouteAmounts.map(async (amountIn) => {
         // Convert amount to wei (USDC has 6 decimals)
-        const amountInWei = parseUnits(amountIn.toString(), tokenIn.decimals).toString();
+        const amountInWei = parseUnits(amountIn.toFixed(tokenIn.decimals), tokenIn.decimals).toString();
 
         // Build URL with parameters like frontend getQuote$
         const url = this.shadowApiUrl + '?' + new URLSearchParams({
@@ -213,8 +238,8 @@ export class Shadow implements IProtocol {
           tokenOutChainId: String(this.chainId),
           protocols: "v2,v3,mixed",
           enableUniversalRouter: "true",
-          slippageTolerance: "20",
-          deadline: "10800",
+          slippageTolerance: shadowConfig.slippageTolerance, // 0.01~20 %
+          deadline: shadowConfig.deadline, // 30 seconds
         });
 
         const response = await fetch(url, {
@@ -240,12 +265,13 @@ export class Shadow implements IProtocol {
         return result;
       }));
 
-      const amountOut = responses.reduce((acc, response, index) => {
+      const quoteMap = responses.reduce((acc, response, index) => {
         // Extract quote data from response - adapting to expected API response format
         const token = getTokenBySymbol(tokenOutSymbol);
         const quoteResult: IQuoteResult = {
           amountIn: Number(qouteAmounts[index].toFixed(token.decimals)),
           amountOut: response.quote ? Number(formatUnits(response.quote, token.decimals)) : 0,
+          amountInWei: parseUnits(qouteAmounts[index].toFixed(tokenIn.decimals), tokenIn.decimals).toString(),
           callData: response.methodParameters?.calldata || '',
           value: response.methodParameters?.value
             // hex to bigint
@@ -258,15 +284,17 @@ export class Shadow implements IProtocol {
         return acc;
       }, {} as Record<number, IQuoteResult>);
 
-      return amountOut;
+      return quoteMap;
     } catch (error) {
-      this.logger.error(`Failed to fetch market data for token ${tokenOutSymbol}`, error.stack, 'getMarketDataForToken');
+      // this.logger.error(`Failed to fetch market data for token ${tokenOutSymbol}`, error.stack, 'getMarketDataForToken');
 
       // Return empty data on error
       return qouteAmounts.reduce((acc, qouteAmount) => {
+
         acc[qouteAmount] = {
           amountIn: qouteAmount,
           amountOut: 0,
+          amountInWei: parseUnits(qouteAmount.toFixed(tokenIn.decimals), tokenIn.decimals).toString(),
           callData: '',
           value: 0,
           rawData: null,

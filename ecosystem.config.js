@@ -1,7 +1,7 @@
 module.exports = {
   apps: [{
-    name: 'stratbot',
-    script: 'nest start',
+    name: 'trading-bot',
+    script: 'npx @nestjs/cli start',
     instances: 1,
     autorestart: true,
     watch: false,
