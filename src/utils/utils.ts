@@ -27,3 +27,11 @@ export async function loadDataFromFile<T>(filePath: string, defaultValue: T): Pr
     return defaultValue;
   }
 }
+
+export const isDevelopment = () => process.env.NODE_ENV === 'development';
+
+export function stringifyBigInt(value: any): string {
+  return JSON.stringify(value, (_, value) =>
+    typeof value === "bigint" ? value.toString() : value,
+  );
+}

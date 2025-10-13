@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { Strat1Service } from './strat1.service';
-import { Strat1Controller } from './strat1';
+import { Strat1Controller } from './strat1.controller';
 
 @Module({
   controllers: [Strat1Controller],

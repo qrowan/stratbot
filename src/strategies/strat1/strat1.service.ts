@@ -1,102 +1,45 @@
-import { Injectable, OnApplicationShutdown, OnModuleDestroy, OnModuleInit, Logger } from '@nestjs/common';
+import { Injectable, OnApplicationShutdown, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { IProtocol, isSuccessOrderResult, OrderState } from 'src/sdks/interfaces/protocol';
-import { IBaseStrategy, OpportunityType } from 'src/sdks/interfaces/strategy';
+import { BaseStrategy, OpportunityType } from 'src/sdks/interfaces/strategy';
 import { Shadow } from 'src/protocols/shadow/shadow';
 import dotenv from 'dotenv';
 import { IShadowSuccessOrderResult, IShadowInternalPosition, IShadowMarketData } from 'src/protocols/shadow/shadow.interfaces';
 import { delay, saveDataToFile, loadDataFromFile } from 'src/utils/utils';
-import { IStrat1Opportunity, IStrat1OrderResponse, IStrat1OrderResult, IStrat1Position, IStrat1Receipt, IStrat1Order, IStrat1RealizedResult, IStrat1UnrealizedResult } from './strat1.interface';
+import { IStrat1Opportunity, IStrat1OrderResponse, IStrat1OrderResult, IStrat1Position, IStrat1Receipt, IStrat1Order, IStrat1RealizedResult, IStrat1UnrealizedResult, LighterConvertedMarketData, IShadowOrder, ILighterOrder, ISuccessStrat1OrderResult, IStrat1InternalPosition } from './strat1.interface';
 import { Lighter } from 'src/protocols/lighter/lighter';
-import { ILighterMarketData, ILighterConfig, ILighterOrderBookOrders } from 'src/protocols/lighter/lighter.interfaces';
+import { ILighterMarketData, ILighterConfig, ILighterOrderBookOrders, LighterOrderType, LighterTimeInForce } from 'src/protocols/lighter/lighter.interfaces';
 import { tradeConfig } from './tradeConfig';
+import { MARKET_ID_MAP } from 'src/protocols/lighter/constants';
+import { QueueManager } from 'src/sdks/queue/QueueManager';
 dotenv.config();
 
 @Injectable()
-export class Strat1Service implements IBaseStrategy, OnModuleInit, OnModuleDestroy, OnApplicationShutdown {
-  public readonly name = 'Strat1';
-  private readonly logger = new Logger(Strat1Service.name);
+export class Strat1Service extends BaseStrategy {
+  public name = 'Strat1';
   public readonly protocolMap: Record<string, IProtocol>;
-  private readonly positions: Record<string, IStrat1Position> = {};
-  private readonly receipts: Record<string, IStrat1Receipt> = {};
-  private readonly dataFilePath = './data/strat1-data.json';
 
-  private shadowName: string;
   private shadow: Shadow;
-  private lighterName: string;
   private lighter: Lighter;
 
   constructor() {
-    const url = process.env.KURA_RPC_URL || '';
-    const privateKey = process.env.KURA_PRIVATE_KEY || '';
-    if (url === '' || privateKey === '') {
-      throw new Error('KURA_RPC_URL or KURA_PRIVATE_KEY is not set');
-    }
-    const publicKey = process.env.KURA_PUBLIC_KEY || '';
-    const shadowApiUrl = process.env.KURA_SHADOW_API_URL || '';
-    this.logger.log(`KURA_RPC_URL: ${url}`);
-    this.shadow = new Shadow(shadowApiUrl, url, privateKey, publicKey);
-    this.shadowName = this.shadow.name;
+    const processQueue = new QueueManager(tradeConfig.processQueueConfig);
+    super('Strat1', processQueue);
+    this.name = 'Strat1';
 
-    const lighterConfig: ILighterConfig = {
-      baseUrl: process.env.LIGHTER_RPC_URL || '',
-      apiKeyPrivateKey: process.env.LIGHTER_PRIVATE_KEY || '',
-      publicKey: process.env.LIGHTER_PUBLIC_KEY || '',
-      accountIndex: 1,
-      apiKeyIndex: 1,
-    };
-    this.lighter = new Lighter(lighterConfig);
-    this.lighterName = this.lighter.name;
+    this.shadow = new Shadow(tradeConfig.shadowConfig.url, tradeConfig.shadowConfig.privateKey, tradeConfig.shadowConfig.publicKey);
+
+    this.lighter = new Lighter(tradeConfig.lighterConfig);
     this.protocolMap = {
-      [this.shadowName]: this.shadow,
-      [this.lighterName]: this.lighter,
+      [this.shadow.name]: this.shadow,
+      [this.lighter.name]: this.lighter,
     };
   }
 
-  async onModuleInit() {
-    this.logger.log("Strat1Service initialized");
-    await this.loadData();
-  }
-
-  async onModuleDestroy() {
-    await this.saveData();
-  }
-
-  async onApplicationShutdown() {
-    await this.saveData();
-  }
-
-  public async saveData(): Promise<void> {
-    try {
-      const data = {
-        positions: this.positions,
-        receipts: this.receipts,
-      };
-      await saveDataToFile(data, this.dataFilePath);
-    } catch (error) {
-      this.logger.error('Failed to save strategy data', error.stack, 'saveData');
-    }
-  }
-
-  private async loadData(): Promise<void> {
-    try {
-      const defaultData = { positions: {}, receipts: {} };
-      const data = await loadDataFromFile(this.dataFilePath, defaultData);
-
-      Object.assign(this.positions, data.positions);
-      Object.assign(this.receipts, data.receipts);
-
-      const positionCount = Object.keys(this.positions).length;
-      const receiptCount = Object.keys(this.receipts).length;
-      this.logger.log(`Loaded ${positionCount} positions and ${receiptCount} receipts from ${this.dataFilePath}`);
-    } catch (error) {
-      this.logger.error('Failed to load strategy data', error.stack, 'loadData');
-    }
-  }
 
   @Cron(tradeConfig.cron)
   async handleCron() {
-    await this.process();
+    await this.run();
   }
 
   async findOpportunities(): Promise<IStrat1Opportunity[]> {
@@ -113,37 +56,84 @@ export class Strat1Service implements IBaseStrategy, OnModuleInit, OnModuleDestr
     saveDataToFile(shadowMarketData, './data/shadow-market-data.json');
     saveDataToFile(lighterMarketData, './data/lighter-market-data.json');
 
+    if (!shadowMarketData.isAvailable) {
+      this.logger.error('Shadow market data is not available');
+      return [];
+    }
+    if (!lighterMarketData.isAvailable) {
+      this.logger.error('Lighter market data is not available');
+      return [];
+    }
+
     // Convert Lighter market data to amountIn -> amountOut mapping
     const lighterConvertedData = this.convertLighterMarketData(lighterMarketData);
     saveDataToFile(lighterConvertedData, './data/lighter-converted-data.json');
 
-    if (!shadowMarketData.isAvailable) {
-      return [];
-    }
+    const opportunities: IStrat1Opportunity[] = this._getOpportunities(shadowMarketData, lighterConvertedData);
+    const filteredOpportunities = this.filterOpportunities(opportunities);
+    saveDataToFile(filteredOpportunities, './data/opportunities.json');
 
-    return [];
+    return filteredOpportunities;
   }
 
-  private convertLighterMarketData(lighterMarketData: ILighterMarketData): Record<string, Record<number, {
-    buy: {
-      amountIn: number;
-      amountOut: number;
-    };
-    sell: {
-      amountIn: number;
-      amountOut: number;
+  private _getOpportunities(shadowMarketData: IShadowMarketData, lighterConvertedData: LighterConvertedMarketData): IStrat1Opportunity[] {
+    const opportunities: IStrat1Opportunity[] = [];
+    for (const symbol of tradeConfig.symbols) {
+      for (const value of tradeConfig.inputValues) {
+        const shadowQuote = shadowMarketData.quotes[symbol][value];
+        const lighterQuote = lighterConvertedData[symbol][value];
+        const shadowBuyRatio = shadowQuote.buy.amountOut / shadowQuote.buy.amountIn;
+        // 0.08 BTC / 100 USDC
+        const lighterSellRatio = lighterQuote.sell.amountOut / lighterQuote.sell.amountIn
+        // 101 USDC / 0.89 BTC
+        const mulitiplier = shadowBuyRatio * lighterSellRatio;
+
+        if (mulitiplier > tradeConfig.minMultiplier) {
+          const firstOrder: IShadowOrder = {
+            protocolName: this.shadow.name,
+            request: {
+              tokenInSymbol: "USDC",
+              tokenOutSymbol: symbol,
+              amountInWei: shadowQuote.buy.amountInWei,
+              callData: shadowQuote.buy.callData,
+              value: shadowQuote.buy.value,
+              instrument: symbol
+            },
+          };
+          const secondOrder: ILighterOrder = {
+            protocolName: this.lighter.name,
+            request: {
+              marketIndex: MARKET_ID_MAP[symbol],
+              clientOrderIndex: 0,
+              baseAmount: lighterQuote.buy.amountIn.toString(),
+              price: Math.floor(1000000 * lighterQuote.buy.amountIn / lighterQuote.buy.amountOut).toString(),
+              isAsk: true,
+              orderType: LighterOrderType.LIMIT,
+              timeInForce: LighterTimeInForce.GOOD_TILL_TIME,
+              reduceOnly: false,
+              instrument: symbol
+            },
+          }
+          opportunities.push({
+            description: `Long SHADOW and short LIGHTER`,
+            type: OpportunityType.OPEN,
+            direction: "long_shadow_short_lighter",
+            symbol: symbol,
+            orders: [firstOrder, secondOrder],
+            multiplier: mulitiplier,
+          });
+        } // TODO : add close
+      }
     }
-  }>> {
-    const result: Record<string, Record<number, {
-      buy: {
-        amountIn: number;
-        amountOut: number;
-      };
-      sell: {
-        amountIn: number;
-        amountOut: number;
-      };
-    }>> = {};
+    return opportunities;
+  }
+
+  private filterOpportunities(opportunities: IStrat1Opportunity[]): IStrat1Opportunity[] {
+    return opportunities.sort((a, b) => b.multiplier - a.multiplier).slice(0, tradeConfig.maxOpportunities);
+  }
+
+  private convertLighterMarketData(lighterMarketData: ILighterMarketData): LighterConvertedMarketData {
+    const result: LighterConvertedMarketData = {};
 
     if (!lighterMarketData.isAvailable || !lighterMarketData.orderBookOrders) {
       return result;
@@ -244,52 +234,7 @@ export class Strat1Service implements IBaseStrategy, OnModuleInit, OnModuleDestr
     throw new Error('Not implemented');
   }
 
-  getPosition(id: string): IStrat1Position {
-    return this.positions[id];
-  }
-
-  getPositions(): IStrat1Position[] {
-    return Object.values(this.positions);
-  }
-
-  getReceipt(id: string): IStrat1Receipt {
-    return this.receipts[id];
-  }
-
-  getReceipts(): IStrat1Receipt[] {
-    return Object.values(this.receipts);
-  }
-
-  async getOrderStatus(orderId: string): Promise<{
-    status: 'finished';
-    result: IStrat1OrderResult;
-  } | {
-    status: 'pending';
-    error: string;
-  }> {
-    return {
-      status: 'finished',
-      result: {
-        id: orderId,
-        status: OrderState.FILLED,
-        result: "successful!",
-      },
-    }
-  }
-
-  async process(): Promise<IStrat1Receipt[]> {
-    // find opportunities
-    const opportunities = await this.findOpportunities();
-    const receipts: IStrat1Receipt[] = [];
-    for (const opportunity of opportunities) {
-      const receipt = await this.execute(opportunity);
-      receipts.push(receipt);
-    }
-    return receipts;
-  }
-
   async execute(opportunity: IStrat1Opportunity): Promise<IStrat1Receipt> {
-    const newReceiptId = crypto.randomUUID();
     try {
       const internalPositions: IShadowInternalPosition[] = [];
       let status: 'success' | 'failed' = 'success';
@@ -310,92 +255,18 @@ export class Strat1Service implements IBaseStrategy, OnModuleInit, OnModuleDestr
         internalPositions,
       }
 
-      const receipt: IStrat1Receipt = {
-        id: newReceiptId,
-        status,
-        positions: [position],
-      }
+      const receipt = status === 'success'
+        ? this.createSuccessReceipt([position])
+        : this.createFailedReceipt();
 
-      this.positions[position.id] = position;
-      this.receipts[receipt.id] = receipt;
+      if (status === 'success') {
+        this.storePositionAndReceipt(position, receipt);
+      }
 
       return receipt;
     } catch (error) {
       this.logger.error('Execute failed', error.stack, 'execute');
-      return {
-        id: newReceiptId,
-        status: 'failed',
-        positions: [],
-      }
+      return this.createFailedReceipt();
     }
-  }
-
-  async orderWithPoll(order: IStrat1Order): Promise<IStrat1OrderResult> {
-    try {
-      const orderResponse = await this.createOrderWithRetries(order);
-      const orderResult = await this.poll(
-        this.protocolMap[order.protocolName].getOrderResult(orderResponse),
-        order.protocolName === this.shadowName
-          ? undefined // skip cancel order for shadow
-          : this.protocolMap[order.protocolName].cancelOrder(orderResponse),
-      );
-      return orderResult;
-    } catch (error) {
-      this.logger.error('Order with poll failed', error.stack, 'orderWithPoll');
-      throw error;
-    }
-  }
-
-  async createOrderWithRetries(order: IStrat1Order): Promise<IStrat1OrderResponse> {
-    const maxRetries = 3;
-    let lastError: Error | unknown;
-    for (let i = 0; i < maxRetries; i++) {
-      try {
-        const orderResponse = await this.protocolMap[order.protocolName].createOrder(order.request);
-        return orderResponse;
-      } catch (error) {
-        lastError = error;
-      }
-    }
-    throw new Error("Create order failed", { cause: lastError });
-  }
-
-  async poll(
-    getOrderResult: Promise<IStrat1OrderResult>,
-    cancelOrder?: Promise<void>,
-  ): Promise<IStrat1OrderResult> {
-    const maxRetries = 3;
-    for (let i = 0; i < maxRetries; i++) {
-      try {
-        const orderResult = await getOrderResult;
-        return orderResult;
-      } catch {
-        await delay(1000);
-      }
-    }
-    if (cancelOrder) {
-      for (let i = 0; i < maxRetries; i++) {
-        try {
-          await cancelOrder;
-          const orderResult = await getOrderResult;
-          return orderResult;
-        } catch {
-          await delay(1000);
-        }
-      }
-    }
-    throw new Error("Cancel order failed");
-  }
-
-  async buildInternalPositions(orderResult: IShadowSuccessOrderResult): Promise<IShadowInternalPosition[]> {
-    const positions: IShadowInternalPosition[] = [];
-    const position: IShadowInternalPosition = {
-      id: orderResult.result.id,
-      protocol: this.shadowName,
-      status: 'opened',
-      instrument: orderResult.result.instrument,
-    }
-    positions.push(position);
-    return positions;
   }
 }

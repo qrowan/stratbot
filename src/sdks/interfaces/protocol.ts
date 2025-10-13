@@ -32,6 +32,7 @@ export interface IBaseOrderResponse {
 }
 
 export interface IBaseOrderResult {
+  protocolName: string;
   id: string;
   status: OrderState;
   result: any;
@@ -48,7 +49,7 @@ export function isSuccessOrderResult(result: IBaseOrderResult): result is ISucce
 export interface IProtocol {
   name: string;
   // order
-  createOrder(request: IBaseOrderRequest): Promise<IBaseOrderResponse>;
+  placeOrder(request: IBaseOrderRequest): Promise<IBaseOrderResponse>;
   // cancel order. return cancel success or not.
   cancelOrder(
     orderData: IBaseOrderResponse

@@ -14,7 +14,7 @@ export class SP1 implements IProtocol {
     this.privateKey = privateKey;
   }
 
-  async createOrder(params: ISP1OrderParams): Promise<ISP1OrderData> {
+  async placeOrder(params: ISP1OrderParams): Promise<ISP1OrderData> {
     const id = crypto.randomUUID();
     return {
       id: id,
@@ -32,6 +32,7 @@ export class SP1 implements IProtocol {
     orderData: ISP1OrderData
   ): Promise<ISP1OrderResult> {
     return {
+      protocolName: this.name,
       id: orderData.id,
       status: OrderState.FILLED,
       result: {

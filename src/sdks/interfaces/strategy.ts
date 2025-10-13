@@ -1,6 +1,8 @@
 import { IBaseMarketData, IBaseOrderResponse, IBaseOrderRequest, IProtocol } from "./protocol";
 import { IBasePosition, IBaseReceipt } from "./position";
 
+export { BaseStrategy } from '../base/BaseStrategy';
+
 export interface IBaseOrder {
   protocolName: string;
   request: IBaseOrderRequest;
@@ -54,6 +56,5 @@ export interface IBaseStrategy {
   getPosition(id: string): IBasePosition;
   getReceipt(id: string): IBaseReceipt;
   getReceipts(): IBaseReceipt[];
-  process(): Promise<IBaseReceipt[]>;
   execute(opportunity: IBaseOpportunity): Promise<IBaseReceipt>;
 }
