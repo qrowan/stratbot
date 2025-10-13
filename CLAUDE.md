@@ -1,125 +1,138 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # General Trading System - Context & Code Patterns
 
-## Project Overview
-This is a NestJS-based general trading system designed for algorithmic trading across multiple protocols. The system implements a modular architecture where trading strategies can be developed and deployed to interact with various trading protocols.
+NestJS-based algorithmic trading system for cross-protocol arbitrage with SQS queue processing.
 
 ## Key Commands
-- `pnpm run start:dev` - Start development server with watch mode
-- `pnpm run build` - Build the project
-- `pnpm run lint` - Run linting with auto-fix
-- `pnpm test` - Run tests
 
-## Architecture Pattern
+- `pnpm run start:dev` - Development with watch mode
+- `pnpm run build` - Build project
+- `pnpm run lint` - Lint with auto-fix
+- `pnpm run test` - Run Jest tests
+- `pnpm run test:watch` - Watch mode testing
+- `pnpm run test:e2e` - End-to-end tests
+- `pnpm run start:pm2` - Production with PM2
+
+## Architecture
 
 ### Core Components
 
-1. **Protocols** (`src/protocols/`) - Trading protocol integrations
-2. **Strategies** (`src/sample-stategy/`) - Trading strategy implementations  
-3. **Interfaces** (`src/interfaces/`) - Type definitions and contracts
+1. **Protocols** (`src/protocols/`) - Trading integrations (Shadow DEX, Lighter CEX, SP1 template)
+2. **Strategies** (`src/strategies/`) - Trading strategies (Strat1 arbitrage, SS1 template)
+3. **SDKs** (`src/sdks/`) - BaseStrategy abstract class, interfaces, QueueManager
+4. **Utils** (`src/utils/`) - Common utilities
 
-### Adding New Trading Strategies
+### Data Flow & State Machine
 
-When implementing a new trading strategy, follow this pattern:
-
-#### 1. Protocol Integration First
-Create protocol modules in `src/protocols/{protocol-name}/`:
-
-```typescript
-// Protocol implementation following IProtocol interface
-export class NewProtocol implements IProtocol {
-  async createOrder(request: IBaseOrderRequest): Promise<IBaseOrderResponse>
-  async cancelOrder(orderData: IBaseOrderResponse): Promise<void>
-  async getOrderResult(orderData: IBaseOrderResponse): Promise<IBaseOrderResult>
-  async getMarketData(): Promise<IBaseMarketData>
-  async getPosition(id: string): Promise<IBaseInternalPosition>
-}
-```
-
-#### 2. Strategy Implementation
-Create strategy services in `src/sample-stategy/{strategy-name}/`:
-
-```typescript
-@Injectable()
-export class NewStrategyService implements BaseStrategy, OnModuleInit, OnModuleDestroy {
-  public readonly name = 'NewStrategy';
-  public readonly protocolMap: Record<string, IProtocol>;
-  
-  // Core strategy methods
-  async findOpportunities(marketData: IBaseMarketData): Promise<IBaseOpportunity[]>
-  async execute(opportunity: IBaseOpportunity): Promise<IBaseReceipt>
-  async process(): Promise<IBaseReceipt[]>
-}
-```
-
-### Data Flow Pattern
-
-1. **Market Data Collection** - Protocols fetch market data
-2. **Opportunity Detection** - Strategies analyze data and identify opportunities
-3. **Position Building** - Strategies execute orders through protocols
-4. **Receipt Management** - Track execution results and positions
+1. **Strategy Lifecycle**: Cron triggers `run()` → `findOpportunities()` → enqueue to SQS
+2. **Queue Processing**: PENDING → PLACING_ORDER → POLLING_ORDER → ORDER_COMPLETED → ALL_ORDERS_COMPLETED
+3. **Data Persistence**: Positions and receipts stored in `./data/{strategy}-data.json`
+4. **Error Handling**: 3x retry with exponential backoff, order cancellation on timeout
 
 ### Key Interfaces
 
-#### BaseStrategy Interface
-- `findOpportunities()` - Analyze market data and identify trading opportunities
-- `execute()` - Execute a trading opportunity by placing orders
-- `process()` - Main processing loop (runs on cron schedule)
-- Position and receipt management methods
+- **IProtocol**: `placeOrder`, `cancelOrder`, `getOrderResult`, `getMarketData`, `getPosition`
+- **BaseStrategy**: Abstract class with `findOpportunities`, `execute`, `getRealizedResult`, `getUnrealizedResult`
+- **OpportunityType**: OPEN, EDIT, CLOSE enum for position management
+- **OrderState**: PENDING, LIVE, CANCELED, PARTIAL_FILLED, FILLED
 
-#### IProtocol Interface  
-- Order management (create, cancel, get status)
-- Market data retrieval
-- Position tracking
+## Environment Configuration
 
-#### Opportunity Types
-- `OPEN` - Open new positions
-- `EDIT` - Modify existing positions  
-- `CLOSE` - Close positions
+Required variables from `.env.example`:
 
-### Error Handling Patterns
+```bash
+# SQS (optional - direct processing if not set)
+SQS_END_POINT=http://localhost:4566
+AWS_REGION=us-east-1
+MAX_CONCURRENT_PROCESSES=3
 
-1. **Retry Logic** - Orders retry up to 3 times with exponential backoff
-2. **Polling Mechanism** - Poll order status with timeout and cancellation fallback
-3. **Receipt System** - Track success/failure of all executions
+# Protocol keys
+SHADOW_RPC_URL=...
+SHADOW_PRIVATE_KEY=0x...
+LIGHTER_RPC_URL=https://mainnet.zklighter.elliot.ai
+LIGHTER_PRIVATE_KEY=0x...
+```
 
-### Scheduling Pattern
+## Adding New Components
 
-Strategies use NestJS scheduling decorators:
+### New Protocol
+
 ```typescript
-@Cron(CronExpression.EVERY_SECOND)
-async handleCron() {
-  await this.process();
+// src/protocols/{name}/{name}.ts
+export class NewProtocol implements IProtocol {
+  public readonly name = 'NewProtocol';
+
+  async placeOrder(request: IBaseOrderRequest): Promise<IBaseOrderResponse>;
+  async cancelOrder(orderData: IBaseOrderResponse): Promise<void>;
+  async getOrderResult(
+    orderData: IBaseOrderResponse,
+  ): Promise<IBaseOrderResult>;
+  async getMarketData(
+    request: IBaseMarketDataRequest,
+  ): Promise<IBaseMarketData>;
+  async getPosition(id: string): Promise<IBaseInternalPosition>;
 }
 ```
 
-### Module Structure
+### New Strategy
 
-Each strategy should be a separate NestJS module:
 ```typescript
-@Module({
-  providers: [NewStrategyService],
-  controllers: [NewStrategyController],
-})
-export class NewStrategyModule {}
+// src/strategies/{name}/{name}.service.ts
+@Injectable()
+export class NewStrategyService extends BaseStrategy {
+  public readonly name = 'NewStrategy';
+  public readonly protocolMap: Record<string, IProtocol>;
+
+  constructor() {
+    const processQueue = new QueueManager(tradeConfig.processQueueConfig);
+    super('NewStrategyService', processQueue);
+
+    this.protocolMap = {
+      protocol1: new Protocol1(),
+      protocol2: new Protocol2(),
+    };
+  }
+
+  @Cron(tradeConfig.cron)
+  async handleCron() {
+    await this.run();
+  }
+
+  async findOpportunities(): Promise<IBaseOpportunity[]>;
+  async execute(opportunity: IBaseOpportunity): Promise<IBaseReceipt>;
+  async getRealizedResult(): Promise<any[]>;
+  async getUnrealizedResult(): Promise<any[]>;
+}
 ```
 
-### Configuration Pattern
+## File Organization
 
-Protocols require environment variables for connection:
-- RPC URLs
-- Private keys/API credentials
-- Protocol-specific configuration
+- **Protocols**: `{name}.ts`, `{name}.interfaces.ts`, `constants.ts`
+- **Strategies**: `{name}.service.ts`, `{name}.module.ts`, `{name}.controller.ts`, `tradeConfig.ts`
+- **Interfaces**: Centralized in `src/sdks/interfaces/`
+- **Data Files**: Auto-generated in `./data/` directory
 
-### Position Management
+## Testing & Quality
 
-- **BasePosition** - High-level position containing multiple internal positions
-- **BaseInternalPosition** - Protocol-specific position data
-- **BaseReceipt** - Execution record with success/failure status
+- Jest for unit tests (`test:watch` for development)
+- ESLint with auto-fix via `pnpm run lint`
+- End-to-end tests in `test/` directory
+- PM2 for production deployment
 
-### File Naming Conventions
+## Current Implementations
 
-- Protocols: `{protocol-name}.ts`, `{protocol-name}.interfaces.ts`
-- Strategies: `{strategy-name}.service.ts`, `{strategy-name}.module.ts`, `{strategy-name}.controller.ts`
-- Interfaces: Descriptive names in `src/interfaces/`
+**Protocols:**
 
-This architecture allows for easy addition of new trading protocols and strategies while maintaining separation of concerns and type safety.
+- **Shadow**: Sei DEX integration with viem + Universal Router
+- **Lighter**: CEX with REST API + secure WASM signer
+- **SP1**: Template/sample protocol
+
+**Strategies:**
+
+- **Strat1**: Spot arbitrage between Shadow-Lighter with opportunity detection
+- **SS1**: Sample strategy template
+
+- Check build successfully after fixing code
