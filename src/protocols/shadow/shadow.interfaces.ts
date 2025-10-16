@@ -49,4 +49,5 @@ export interface IShadowConfig {
   url: string;
   privateKey: string;
   publicKey: string;
+  apiUrl: string;
 }

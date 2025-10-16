@@ -16,6 +16,7 @@ const getShadowConfig = (): IShadowConfig => {
     url: validateEnvVar('SHADOW_RPC_URL'),
     privateKey: validateEnvVar('SHADOW_PRIVATE_KEY'),
     publicKey: validateEnvVar('SHADOW_PUBLIC_KEY'),
+    apiUrl: validateEnvVar('SHADOW_API_URL'),
   };
 };
 

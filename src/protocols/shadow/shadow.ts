@@ -2,7 +2,7 @@ import { IProtocol, OrderState } from "src/sdks/interfaces/protocol";
 import { Logger } from "@nestjs/common";
 import { IShadowInternalPosition, IShadowMarketData, IShadowOrderData, IShadowOrderRequest, IShadowOrderResult, IQuoteResult, IShadowMarketDataRequest } from "./shadow.interfaces";
 import { getTokenBySymbol, TOKEN_ADDRESSES, SUPPORTED_TOKENS, UNIVERSAL_ROUTER_ADDRESS } from "./contants";
-import { createWalletClient, createPublicClient, http, Hex, Account, PublicClient, WalletClient, parseEventLogs, decodeEventLog, parseUnits, formatUnits } from "viem";
+import { createWalletClient, createPublicClient, http, Hex, Account, PublicClient, WalletClient, parseEventLogs, decodeEventLog, parseUnits, formatUnits, encodeFunctionData } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { sonic } from "viem/chains";
 import ERC20_ABI from "./abis/ERC20.json";

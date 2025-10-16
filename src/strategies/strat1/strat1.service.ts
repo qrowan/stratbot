@@ -27,7 +27,7 @@ export class Strat1Service extends BaseStrategy {
     super('Strat1', processQueue);
     this.name = 'Strat1';
 
-    this.shadow = new Shadow(tradeConfig.shadowConfig.url, tradeConfig.shadowConfig.privateKey, tradeConfig.shadowConfig.publicKey);
+    this.shadow = new Shadow(tradeConfig.shadowConfig.url, tradeConfig.shadowConfig.privateKey, tradeConfig.shadowConfig.publicKey, tradeConfig.shadowConfig.apiUrl);
 
     this.lighter = new Lighter(tradeConfig.lighterConfig);
     this.protocolMap = {
